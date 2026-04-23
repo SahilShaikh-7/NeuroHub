@@ -5,7 +5,12 @@ export const metadata = {
   title: 'NeuroFlow – Offline AI Adaptive Productivity',
   description: 'Local-first, adaptive productivity OS. Smart priorities, behavior-aware insights, anti-fake activity validation, and a rule-based assistant — no paid AI APIs.',
   manifest: '/manifest.json',
+}
+
+export const viewport = {
   themeColor: '#a855f7',
+  width: 'device-width',
+  initialScale: 1,
 }
 
 export default function RootLayout({ children }) {

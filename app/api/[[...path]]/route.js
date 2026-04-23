@@ -3,15 +3,27 @@ import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 
-// ---------- MongoDB ----------
-let client, db
+// ---------- MongoDB (serverless-safe global cache) ----------
+// On Vercel/Render serverless, module-level `let client` is reset per cold start.
+// Using `globalThis` keeps the connection alive across hot-reloads AND
+// warm invocations — this is the official Next.js recommended pattern.
+let clientPromise
 async function connectToMongo() {
-  if (!client) {
-    client = new MongoClient(process.env.MONGO_URL)
-    await client.connect()
-    db = client.db(process.env.DB_NAME || 'neuroflow')
+  if (!clientPromise) {
+    if (!process.env.MONGO_URL) throw new Error('MONGO_URL env var missing')
+    if (globalThis.__neuroflowMongo) {
+      clientPromise = globalThis.__neuroflowMongo
+    } else {
+      const c = new MongoClient(process.env.MONGO_URL, {
+        maxPoolSize: 10,
+        serverSelectionTimeoutMS: 8000,
+      })
+      clientPromise = c.connect()
+      if (process.env.NODE_ENV !== 'production') globalThis.__neuroflowMongo = clientPromise
+    }
   }
-  return db
+  const client = await clientPromise
+  return client.db(process.env.DB_NAME || 'neuroflow')
 }
 
 function cors(res) {
