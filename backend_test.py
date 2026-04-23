@@ -727,10 +727,564 @@ class NeuroFlowTester:
         else:
             self.log_result("Chatbot Unknown Message", False, f"Status {response.status_code}: {response.text}")
             return False
+
+    # =================================================================
+    # PHASE 2 TESTS - Anti-Fake Detection, Activity Logs, Workspaces
+    # =================================================================
+    
+    def test_task_start_endpoint(self):
+        """Test POST /api/tasks/:id/start endpoint"""
+        # Create a task first
+        task_data = {
+            "title": "Test start endpoint task",
+            "category": "testing",
+            "importance": 5,
+            "effort": 5
+        }
+        
+        response = self.make_request('POST', '/tasks', task_data)
+        if not response or response.status_code != 200:
+            self.log_result("Task Start Endpoint", False, "Failed to create test task")
+            return False
+            
+        task = response.json()['task']
+        
+        # Test start endpoint
+        start_response = self.make_request('POST', f'/tasks/{task["id"]}/start')
+        if not start_response:
+            self.log_result("Task Start Endpoint", False, "Start request failed")
+            return False
+            
+        if start_response.status_code == 200:
+            data = start_response.json()
+            if 'ok' in data and data['ok'] and 'startedAt' in data:
+                # Verify GET /tasks shows startedAt
+                get_response = self.make_request('GET', '/tasks')
+                if get_response and get_response.status_code == 200:
+                    tasks = get_response.json()['tasks']
+                    started_task = next((t for t in tasks if t['id'] == task['id']), None)
+                    if started_task and started_task.get('startedAt'):
+                        self.log_result("Task Start Endpoint", True, f"Task started at: {data['startedAt']}")
+                        return True
+                        
+        self.log_result("Task Start Endpoint", False, "Start endpoint failed")
+        return False
+        
+    def test_anti_fake_instant_completion(self):
+        """Test anti-fake detection for instant completion"""
+        # Create a task
+        task_data = {
+            "title": "Instant fake completion test",
+            "category": "testing",
+            "importance": 5,
+            "effort": 5
+        }
+        
+        response = self.make_request('POST', '/tasks', task_data)
+        if not response or response.status_code != 200:
+            self.log_result("Anti-Fake Instant", False, "Failed to create test task")
+            return False
+            
+        task = response.json()['task']
+        
+        # Complete immediately (within 1 second)
+        complete_response = self.make_request('POST', f'/tasks/{task["id"]}/complete')
+        if not complete_response:
+            self.log_result("Anti-Fake Instant", False, "Complete request failed")
+            return False
+            
+        if complete_response.status_code == 200:
+            data = complete_response.json()
+            required_fields = ['ok', 'confidence', 'flagged', 'reasons', 'xpEarned', 'baseXP']
+            missing_fields = [field for field in required_fields if field not in data]
+            
+            if not missing_fields:
+                confidence = data['confidence']
+                flagged = data['flagged']
+                reasons = data['reasons']
+                xp_earned = data['xpEarned']
+                base_xp = data['baseXP']
+                
+                # Verify anti-fake detection
+                if confidence < 0.5 and flagged and xp_earned == round(base_xp * confidence):
+                    has_instant_reason = any('instant' in r.lower() or '<10s' in r.lower() or '<3s' in r.lower() for r in reasons)
+                    if has_instant_reason:
+                        self.log_result("Anti-Fake Instant", True, f"Confidence: {confidence}, Flagged: {flagged}, XP: {xp_earned}/{base_xp}")
+                        return True
+                    else:
+                        self.log_result("Anti-Fake Instant", False, f"Missing instant completion reason: {reasons}")
+                        return False
+                else:
+                    self.log_result("Anti-Fake Instant", False, f"Anti-fake detection failed: conf={confidence}, flagged={flagged}, xp={xp_earned}")
+                    return False
+            else:
+                self.log_result("Anti-Fake Instant", False, f"Missing fields: {missing_fields}")
+                return False
+        else:
+            self.log_result("Anti-Fake Instant", False, f"Status {complete_response.status_code}: {complete_response.text}")
+            return False
+            
+    def test_anti_fake_honest_completion(self):
+        """Test honest completion with start -> wait -> complete"""
+        # Create a task
+        task_data = {
+            "title": "Honest completion test",
+            "category": "testing",
+            "importance": 5,
+            "effort": 5
+        }
+        
+        response = self.make_request('POST', '/tasks', task_data)
+        if not response or response.status_code != 200:
+            self.log_result("Anti-Fake Honest", False, "Failed to create test task")
+            return False
+            
+        task = response.json()['task']
+        
+        # Start the task
+        start_response = self.make_request('POST', f'/tasks/{task["id"]}/start')
+        if not start_response or start_response.status_code != 200:
+            self.log_result("Anti-Fake Honest", False, "Failed to start task")
+            return False
+            
+        # Wait 3 seconds
+        time.sleep(3)
+        
+        # Complete the task
+        complete_response = self.make_request('POST', f'/tasks/{task["id"]}/complete')
+        if not complete_response:
+            self.log_result("Anti-Fake Honest", False, "Complete request failed")
+            return False
+            
+        if complete_response.status_code == 200:
+            data = complete_response.json()
+            confidence = data.get('confidence', 0)
+            flagged = data.get('flagged', True)
+            xp_earned = data.get('xpEarned', 0)
+            base_xp = data.get('baseXP', 15)
+            
+            # Verify honest completion gets good score
+            if confidence >= 0.5 and not flagged and xp_earned == round(base_xp * confidence):
+                # Verify user XP increased
+                me_response = self.make_request('GET', '/auth/me')
+                if me_response and me_response.status_code == 200:
+                    user = me_response.json()['user']
+                    self.log_result("Anti-Fake Honest", True, f"Confidence: {confidence}, Not flagged, XP: {xp_earned}, User XP: {user.get('xp', 0)}")
+                    return True
+                else:
+                    self.log_result("Anti-Fake Honest", False, "Failed to verify user XP")
+                    return False
+            else:
+                self.log_result("Anti-Fake Honest", False, f"Honest completion failed: conf={confidence}, flagged={flagged}, xp={xp_earned}")
+                return False
+        else:
+            self.log_result("Anti-Fake Honest", False, f"Status {complete_response.status_code}: {complete_response.text}")
+            return False
+            
+    def test_anti_fake_habit_checkin(self):
+        """Test anti-fake detection on habit check-in"""
+        # Create a habit
+        habit_data = {"name": "Anti-fake test habit"}
+        
+        response = self.make_request('POST', '/habits', habit_data)
+        if not response or response.status_code != 200:
+            self.log_result("Anti-Fake Habit", False, "Failed to create test habit")
+            return False
+            
+        habit = response.json()['habit']
+        
+        # Check in
+        checkin_response = self.make_request('POST', f'/habits/{habit["id"]}/checkin')
+        if not checkin_response:
+            self.log_result("Anti-Fake Habit", False, "Checkin request failed")
+            return False
+            
+        if checkin_response.status_code == 200:
+            data = checkin_response.json()
+            required_fields = ['confidence', 'flagged', 'reasons', 'xpEarned', 'baseXP']
+            missing_fields = [field for field in required_fields if field not in data]
+            
+            if not missing_fields:
+                base_xp = data['baseXP']
+                if base_xp == 10:  # Base XP for habits should be 10
+                    self.log_result("Anti-Fake Habit", True, f"Habit checkin with anti-fake: conf={data['confidence']}, baseXP={base_xp}")
+                    return True
+                else:
+                    self.log_result("Anti-Fake Habit", False, f"Wrong base XP: expected 10, got {base_xp}")
+                    return False
+            else:
+                self.log_result("Anti-Fake Habit", False, f"Missing fields: {missing_fields}")
+                return False
+        else:
+            self.log_result("Anti-Fake Habit", False, f"Status {checkin_response.status_code}: {checkin_response.text}")
+            return False
+            
+    def test_activity_logs(self):
+        """Test GET /api/activity-logs endpoint"""
+        response = self.make_request('GET', '/activity-logs')
+        if not response:
+            self.log_result("Activity Logs", False, "Request failed")
+            return False
+            
+        if response.status_code == 200:
+            data = response.json()
+            required_fields = ['logs', 'total', 'flagged', 'trust']
+            missing_fields = [field for field in required_fields if field not in data]
+            
+            if not missing_fields:
+                logs = data['logs']
+                # Verify log structure
+                if logs:
+                    log = logs[0]
+                    log_fields = ['id', 'userId', 'actionType', 'targetId', 'timestamp', 'confidenceScore', 'flagged', 'reasons']
+                    missing_log_fields = [field for field in log_fields if field not in log]
+                    
+                    if not missing_log_fields:
+                        # Check for task_complete and habit_check actions
+                        action_types = set(log['actionType'] for log in logs)
+                        has_task_complete = 'task_complete' in action_types
+                        has_habit_check = 'habit_check' in action_types
+                        
+                        self.log_result("Activity Logs", True, f"Found {len(logs)} logs, total={data['total']}, flagged={data['flagged']}, trust={data['trust']}")
+                        return True
+                    else:
+                        self.log_result("Activity Logs", False, f"Missing log fields: {missing_log_fields}")
+                        return False
+                else:
+                    self.log_result("Activity Logs", True, "No logs yet (empty response is valid)")
+                    return True
+            else:
+                self.log_result("Activity Logs", False, f"Missing fields: {missing_fields}")
+                return False
+        else:
+            self.log_result("Activity Logs", False, f"Status {response.status_code}: {response.text}")
+            return False
+            
+    def test_batch_detection(self):
+        """Test batch detection by rapidly completing multiple tasks"""
+        # Create 6 tasks
+        tasks = []
+        for i in range(6):
+            task_data = {
+                "title": f"Batch test task {i+1}",
+                "category": "batch_testing",
+                "importance": 5,
+                "effort": 5
+            }
+            
+            response = self.make_request('POST', '/tasks', task_data)
+            if response and response.status_code == 200:
+                tasks.append(response.json()['task'])
+                
+        if len(tasks) < 6:
+            self.log_result("Batch Detection", False, f"Only created {len(tasks)}/6 tasks")
+            return False
+            
+        # Rapidly complete 5 tasks within 10 seconds
+        batch_results = []
+        for i in range(5):
+            complete_response = self.make_request('POST', f'/tasks/{tasks[i]["id"]}/complete')
+            if complete_response and complete_response.status_code == 200:
+                batch_results.append(complete_response.json())
+                time.sleep(0.5)  # Small delay between completions
+                
+        # Check if later completions were flagged for batch pattern
+        flagged_for_batch = 0
+        for result in batch_results[2:]:  # Check last 3 completions
+            if result.get('flagged') and any('batch' in r.lower() or 'rapid' in r.lower() for r in result.get('reasons', [])):
+                flagged_for_batch += 1
+                
+        if flagged_for_batch > 0:
+            self.log_result("Batch Detection", True, f"Detected batch pattern in {flagged_for_batch} completions")
+            return True
+        else:
+            self.log_result("Batch Detection", False, "Batch pattern not detected")
+            return False
+            
+    def test_analytics_enhancement(self):
+        """Test enhanced analytics with trust metrics"""
+        response = self.make_request('GET', '/analytics')
+        if not response:
+            self.log_result("Analytics Enhancement", False, "Request failed")
+            return False
+            
+        if response.status_code == 200:
+            data = response.json()
+            new_fields = ['trustScore', 'totalActions', 'flaggedActions', 'allCompletedTasks', 'flaggedTasks']
+            missing_fields = [field for field in new_fields if field not in data]
+            
+            if not missing_fields:
+                # Verify completedTasks vs allCompletedTasks
+                completed_tasks = data['completedTasks']
+                all_completed = data['allCompletedTasks']
+                flagged_tasks = data['flaggedTasks']
+                
+                if all_completed >= completed_tasks and flagged_tasks >= 0:
+                    self.log_result("Analytics Enhancement", True, f"Trust: {data['trustScore']}%, Valid: {completed_tasks}/{all_completed}, Flagged: {flagged_tasks}")
+                    return True
+                else:
+                    self.log_result("Analytics Enhancement", False, f"Invalid counts: completed={completed_tasks}, all={all_completed}, flagged={flagged_tasks}")
+                    return False
+            else:
+                self.log_result("Analytics Enhancement", False, f"Missing new fields: {missing_fields}")
+                return False
+        else:
+            self.log_result("Analytics Enhancement", False, f"Status {response.status_code}: {response.text}")
+            return False
+            
+    def test_behavior_engine_protection(self):
+        """Test behavior engine excludes flagged completions from learning"""
+        # Create and instantly complete 2 tasks in 'coding' category (should be flagged)
+        for i in range(2):
+            task_data = {
+                "title": f"Coding task {i+1} for behavior test",
+                "category": "coding",
+                "importance": 5,
+                "effort": 5
+            }
+            
+            response = self.make_request('POST', '/tasks', task_data)
+            if response and response.status_code == 200:
+                task = response.json()['task']
+                # Complete instantly (should be flagged)
+                self.make_request('POST', f'/tasks/{task["id"]}/complete')
+                
+        # Now create a new 'coding' task
+        new_task_data = {
+            "title": "New coding task to check delayHistory",
+            "category": "coding",
+            "importance": 5,
+            "effort": 5
+        }
+        
+        response = self.make_request('POST', '/tasks', new_task_data)
+        if not response or response.status_code != 200:
+            self.log_result("Behavior Engine Protection", False, "Failed to create new task")
+            return False
+            
+        task = response.json()['task']
+        delay_history = task.get('delayHistory', -1)
+        
+        # delayHistory should be 0 because flagged completions are excluded
+        if delay_history == 0:
+            self.log_result("Behavior Engine Protection", True, f"DelayHistory correctly excluded flagged completions: {delay_history}")
+            return True
+        else:
+            self.log_result("Behavior Engine Protection", False, f"DelayHistory should be 0, got: {delay_history}")
+            return False
+            
+    def test_workspaces_create_and_list(self):
+        """Test workspace creation and listing"""
+        # Create workspace
+        workspace_data = {"name": "Team Alpha Testing"}
+        
+        response = self.make_request('POST', '/workspaces', workspace_data)
+        if not response:
+            self.log_result("Workspaces Create", False, "Create request failed")
+            return False
+            
+        if response.status_code == 200:
+            data = response.json()
+            if 'workspace' in data:
+                workspace = data['workspace']
+                required_fields = ['id', 'name', 'inviteCode', 'role']
+                missing_fields = [field for field in required_fields if field not in workspace]
+                
+                if not missing_fields and workspace['role'] == 'owner':
+                    # Test listing workspaces
+                    list_response = self.make_request('GET', '/workspaces')
+                    if list_response and list_response.status_code == 200:
+                        workspaces = list_response.json()['workspaces']
+                        found_workspace = next((w for w in workspaces if w['id'] == workspace['id']), None)
+                        
+                        if found_workspace:
+                            self.log_result("Workspaces Create", True, f"Created workspace: {workspace['name']}, invite: {workspace['inviteCode']}")
+                            self.test_workspace_id = workspace['id']
+                            self.test_invite_code = workspace['inviteCode']
+                            return True
+                            
+        self.log_result("Workspaces Create", False, "Workspace creation/listing failed")
+        return False
+        
+    def test_workspaces_collaboration(self):
+        """Test workspace collaboration features"""
+        if not hasattr(self, 'test_workspace_id'):
+            self.log_result("Workspaces Collaboration", False, "No workspace to test with")
+            return False
+            
+        # Create second user
+        user_b_data = {
+            "name": "Bob Collaborator",
+            "email": "bob.collab@neuroflow.test",
+            "password": "SecurePass123!",
+            "role": "professional"
+        }
+        
+        response = self.make_request('POST', '/auth/register', user_b_data)
+        if not response or response.status_code != 200:
+            self.log_result("Workspaces Collaboration", False, "Failed to create user B")
+            return False
+            
+        user_b_token = response.json()['token']
+        
+        # User A invites User B by email
+        invite_data = {"email": "bob.collab@neuroflow.test"}
+        invite_response = self.make_request('POST', f'/workspaces/{self.test_workspace_id}/invite', invite_data)
+        
+        if not invite_response or invite_response.status_code != 200:
+            self.log_result("Workspaces Collaboration", False, "Failed to invite user B")
+            return False
+            
+        # Switch to User B token
+        original_token = self.token
+        self.token = user_b_token
+        
+        # User B should see the workspace
+        list_response = self.make_request('GET', '/workspaces')
+        if not list_response or list_response.status_code != 200:
+            self.token = original_token
+            self.log_result("Workspaces Collaboration", False, "User B can't list workspaces")
+            return False
+            
+        workspaces = list_response.json()['workspaces']
+        found_workspace = next((w for w in workspaces if w['id'] == self.test_workspace_id), None)
+        
+        if not found_workspace or found_workspace['role'] != 'member':
+            self.token = original_token
+            self.log_result("Workspaces Collaboration", False, "User B doesn't see workspace as member")
+            return False
+            
+        # User A creates a shared task
+        self.token = original_token
+        shared_task_data = {
+            "title": "Shared workspace task",
+            "category": "collaboration",
+            "workspaceId": self.test_workspace_id
+        }
+        
+        task_response = self.make_request('POST', '/tasks', shared_task_data)
+        if not task_response or task_response.status_code != 200:
+            self.log_result("Workspaces Collaboration", False, "Failed to create shared task")
+            return False
+            
+        shared_task = task_response.json()['task']
+        
+        # User B should be able to complete the shared task
+        self.token = user_b_token
+        complete_response = self.make_request('POST', f'/tasks/{shared_task["id"]}/complete')
+        
+        if complete_response and complete_response.status_code == 200:
+            # Test workspace analytics
+            analytics_response = self.make_request('GET', f'/workspaces/{self.test_workspace_id}/analytics')
+            if analytics_response and analytics_response.status_code == 200:
+                analytics = analytics_response.json()
+                required_fields = ['totalTasks', 'validCompleted', 'completionRate', 'memberStats']
+                missing_fields = [field for field in required_fields if field not in analytics]
+                
+                if not missing_fields:
+                    member_stats = analytics['memberStats']
+                    if len(member_stats) >= 2:  # Owner + member
+                        self.token = original_token
+                        self.log_result("Workspaces Collaboration", True, f"Collaboration working: {len(member_stats)} members, {analytics['totalTasks']} tasks")
+                        return True
+                        
+        self.token = original_token
+        self.log_result("Workspaces Collaboration", False, "Collaboration features failed")
+        return False
+        
+    def test_workspaces_join_by_code(self):
+        """Test joining workspace by invite code"""
+        if not hasattr(self, 'test_invite_code'):
+            self.log_result("Workspaces Join Code", False, "No invite code to test with")
+            return False
+            
+        # Create third user
+        user_c_data = {
+            "name": "Charlie Joiner",
+            "email": "charlie.join@neuroflow.test",
+            "password": "SecurePass123!",
+            "role": "student"
+        }
+        
+        response = self.make_request('POST', '/auth/register', user_c_data)
+        if not response or response.status_code != 200:
+            self.log_result("Workspaces Join Code", False, "Failed to create user C")
+            return False
+            
+        user_c_token = response.json()['token']
+        
+        # Switch to User C
+        original_token = self.token
+        self.token = user_c_token
+        
+        # Join workspace using invite code
+        join_data = {"inviteCode": self.test_invite_code}
+        join_response = self.make_request('POST', '/workspaces/join', join_data)
+        
+        if join_response and join_response.status_code == 200:
+            join_result = join_response.json()
+            if join_result.get('ok') and join_result.get('workspaceId'):
+                # Verify user C can see the workspace
+                list_response = self.make_request('GET', '/workspaces')
+                if list_response and list_response.status_code == 200:
+                    workspaces = list_response.json()['workspaces']
+                    joined_workspace = next((w for w in workspaces if w['id'] == join_result['workspaceId']), None)
+                    
+                    if joined_workspace and joined_workspace['role'] == 'member':
+                        self.token = original_token
+                        self.log_result("Workspaces Join Code", True, f"User C joined workspace: {joined_workspace['name']}")
+                        return True
+                        
+        self.token = original_token
+        self.log_result("Workspaces Join Code", False, "Join by invite code failed")
+        return False
+        
+    def test_workspaces_permissions(self):
+        """Test workspace permission restrictions"""
+        if not hasattr(self, 'test_workspace_id'):
+            self.log_result("Workspaces Permissions", False, "No workspace to test with")
+            return False
+            
+        # Create user D (non-member)
+        user_d_data = {
+            "name": "Dave Outsider",
+            "email": "dave.outsider@neuroflow.test",
+            "password": "SecurePass123!",
+            "role": "freelancer"
+        }
+        
+        response = self.make_request('POST', '/auth/register', user_d_data)
+        if not response or response.status_code != 200:
+            self.log_result("Workspaces Permissions", False, "Failed to create user D")
+            return False
+            
+        user_d_token = response.json()['token']
+        
+        # Switch to User D (non-member)
+        original_token = self.token
+        self.token = user_d_token
+        
+        # Try to invite someone (should fail - only owner can invite)
+        invite_data = {"email": "someone@test.com"}
+        invite_response = self.make_request('POST', f'/workspaces/{self.test_workspace_id}/invite', invite_data)
+        
+        # Should get 403 or 404 (not found/forbidden)
+        if invite_response and invite_response.status_code in [403, 404]:
+            # Try to delete workspace (should fail - only owner can delete)
+            delete_response = self.make_request('DELETE', f'/workspaces/{self.test_workspace_id}')
+            
+            if delete_response and delete_response.status_code in [403, 404]:
+                self.token = original_token
+                self.log_result("Workspaces Permissions", True, "Permission restrictions working correctly")
+                return True
+                
+        self.token = original_token
+        self.log_result("Workspaces Permissions", False, "Permission restrictions not working")
+        return False
             
     def run_all_tests(self):
         """Run all tests in sequence"""
-        print(f"🚀 Starting NeuroFlow Backend API Tests")
+        print(f"🚀 Starting NeuroFlow Backend API Tests - Phase 2")
         print(f"📍 Base URL: {API_BASE}")
         print("=" * 60)
         
@@ -776,6 +1330,27 @@ class NeuroFlowTester:
         self.test_chatbot_add_habit()
         self.test_chatbot_show_stats()
         self.test_chatbot_unknown_message()
+        
+        # PHASE 2 TESTS
+        print("\n🛡️ Phase 2: Anti-Fake Detection Tests")
+        self.test_task_start_endpoint()
+        self.test_anti_fake_instant_completion()
+        self.test_anti_fake_honest_completion()
+        self.test_anti_fake_habit_checkin()
+        
+        print("\n📋 Phase 2: Activity Logs & Batch Detection")
+        self.test_activity_logs()
+        self.test_batch_detection()
+        
+        print("\n📊 Phase 2: Enhanced Analytics & Behavior Protection")
+        self.test_analytics_enhancement()
+        self.test_behavior_engine_protection()
+        
+        print("\n👥 Phase 2: Workspaces & Collaboration")
+        self.test_workspaces_create_and_list()
+        self.test_workspaces_collaboration()
+        self.test_workspaces_join_by_code()
+        self.test_workspaces_permissions()
         
         # Summary
         print("\n" + "=" * 60)
