@@ -365,10 +365,65 @@ function parseDateHint(text) {
   }
   return date
 }
+// ---------- Intent helpers ----------
+const MOTIVATIONS = [
+  "🚀 One task at a time. You've got this.",
+  "💪 Progress > perfection. Ship something today.",
+  "🌱 Small consistent wins compound into big change.",
+  "⚡ Your future self is built by the task in front of you.",
+  "🔥 Discipline is choosing between what you want now and what you want most.",
+  "🎯 Focus is saying no to 99 good things.",
+  "✨ You don't need more time — you need fewer tabs open."
+]
+function fmtTime(d) { return new Date(d).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
+function matchTaskByName(tasks, query) {
+  const q = query.toLowerCase().trim()
+  if (!q) return null
+  // exact > startsWith > includes
+  return tasks.find(t => t.title.toLowerCase() === q) ||
+         tasks.find(t => t.title.toLowerCase().startsWith(q)) ||
+         tasks.find(t => t.title.toLowerCase().includes(q)) ||
+         tasks.find(t => q.split(' ').every(w => t.title.toLowerCase().includes(w)))
+}
+function matchHabitByName(habits, query) {
+  const q = query.toLowerCase().trim()
+  if (!q) return null
+  return habits.find(h => h.name.toLowerCase() === q) ||
+         habits.find(h => h.name.toLowerCase().startsWith(q)) ||
+         habits.find(h => h.name.toLowerCase().includes(q))
+}
+
 async function chatbotHandle(d, user, message) {
   const text = (message || '').trim()
   const lower = text.toLowerCase()
 
+  // ==================== Greeting / small talk ====================
+  if (/^(hi|hello|hey|yo|hola|howdy|good (morning|afternoon|evening))\b/i.test(lower)) {
+    const hour = new Date().getHours()
+    const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+    return { reply: `${greet}, ${user.name?.split(' ')[0] || 'friend'}! 👋 What should we tackle next?\nTry: "show my top task", "what's due today", or "give me insights".`, action: null }
+  }
+  if (/^(thanks|thank you|thx|ty|appreciate it|thank u)/i.test(lower))
+    return { reply: "Anytime. Now back to work 💪", action: null }
+  if (/\b(who are you|what are you|your name)\b/i.test(lower))
+    return { reply: "I'm the NeuroFlow Assistant — a local, rule-based NLU bot. I parse your commands with regex + intent mapping. No external LLMs, no data leaves your server.", action: null }
+  if (/\b(help|commands?|what can you do|capabilities|menu)\b/i.test(lower))
+    return {
+      reply: `🧠 I can do a lot! Try:\n\n📝 Tasks\n• Add task <title> tomorrow at 5 PM\n• Show my (pending|completed|overdue) tasks\n• What's due (today|this week)\n• What's my top task / top priority\n• Complete <task name>\n• Delete <task name>\n• Set priority of <task> to high\n\n🔁 Habits\n• Add habit read 30 min\n• List my habits / show streaks\n• Check in <habit>\n• Delete habit <name>\n\n📊 Analytics & AI\n• Show my stats / productivity / trust score\n• How many tasks do I have\n• Weekly summary\n• Peak hours / when do I work best\n• Give me insights\n• Flagged activity / security\n\n👥 Teams\n• Show my workspaces\n• Create workspace <name>\n\n⏱️ Focus\n• Start a pomodoro / take a break\n• Motivate me\n• What time is it\n\nType any of these!`,
+      action: 'help'
+    }
+  if (/^(bye|goodbye|see you|cya|later)/i.test(lower))
+    return { reply: "Go ship something great. See you soon 👋", action: null }
+  if (/\b(motivate|encourage|inspire|pep talk|motivation)\b/i.test(lower))
+    return { reply: MOTIVATIONS[Math.floor(Math.random() * MOTIVATIONS.length)], action: null }
+  if (/\b(time|clock|what time)\b/i.test(lower) && !/\btasks?\b/.test(lower))
+    return { reply: `🕒 It's ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} on ${new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}.`, action: null }
+  if (/\b(pomodoro|focus timer|start timer|25 min|deep work)\b/i.test(lower))
+    return { reply: "🍅 Pomodoro plan: 25 min focused work → 5 min break → repeat 4× → 15 min long break. Pick your top task, hit Start on it, then silence notifications. I'll be here when you're done.", action: null }
+  if (/\b(break|rest|tired|burn(ed|t)? out)\b/i.test(lower))
+    return { reply: "🌿 Stand up, stretch, look 20 feet away for 20 seconds, drink water. Back in 5?", action: null }
+
+  // ==================== Add task ====================
   if (/^(add|create|new)\s+(task|todo)/i.test(text) || /^remind me to/i.test(text)) {
     let title = text.replace(/^(add|create|new)\s+(task|todo)\s*:?/i, '').replace(/^remind me to/i, '').trim()
     const deadline = parseDateHint(title)
@@ -390,20 +445,62 @@ async function chatbotHandle(d, user, message) {
     await d.collection('tasks').insertOne(task)
     await awardXP(d, user, 5)
     const { _id, ...clean } = task
-    return { reply: `✅ Added task "${title}"${deadline ? ` due ${deadline.toLocaleString()}` : ''} (priority ${priority})`, action: 'task_created', data: clean }
+    return { reply: `✅ Added task "${title}"${deadline ? ` due ${fmtTime(deadline)}` : ''} (priority ${priority})`, action: 'task_created', data: clean }
+  }
+
+  // ==================== Fetch task lists ====================
+  const allTasks = await d.collection('tasks').find({ userId: user.id }).sort({ priority: -1 }).toArray()
+  const pending = allTasks.filter(t => t.status === 'pending')
+  const done = allTasks.filter(t => t.status === 'completed')
+
+  if (/\b(top (task|priority)|most important|what should i do|focus on|next task)\b/i.test(lower)) {
+    if (!pending.length) return { reply: "🎉 Inbox zero. Add a new task or take a well-earned break.", action: null }
+    const top = pending[0]
+    return { reply: `🎯 Your top priority is "${top.title}" (P${top.priority})${top.deadline ? ` · due ${fmtTime(top.deadline)}` : ''}. Want to hit Start on it?`, action: 'top_task' }
+  }
+  if (/\b(overdue|late|past due|missed deadline)\b/i.test(lower)) {
+    const now = Date.now()
+    const overdue = pending.filter(t => t.deadline && new Date(t.deadline).getTime() < now)
+    if (!overdue.length) return { reply: "✅ Nothing overdue. Keep it up.", action: null }
+    const lines = overdue.slice(0, 5).map((t, i) => `${i + 1}. ${t.title} · was due ${fmtTime(t.deadline)}`).join('\n')
+    return { reply: `⏰ ${overdue.length} overdue task(s):\n${lines}`, action: 'list_overdue' }
+  }
+  if (/\b(due today|today'?s tasks|what'?s on today|today list)\b/i.test(lower)) {
+    const start = new Date(); start.setHours(0, 0, 0, 0)
+    const end = new Date(start); end.setDate(end.getDate() + 1)
+    const today = pending.filter(t => t.deadline && new Date(t.deadline) >= start && new Date(t.deadline) < end)
+    if (!today.length) return { reply: "📅 Nothing due today. Maybe plan tomorrow?", action: null }
+    const lines = today.map((t, i) => `${i + 1}. ${t.title} (P${t.priority})`).join('\n')
+    return { reply: `🗓️ Due today (${today.length}):\n${lines}`, action: 'list_today' }
+  }
+  if (/\b(this week|weekly|due this week|7 days)\b/i.test(lower) && /\btasks?\b/i.test(lower)) {
+    const start = new Date(); start.setHours(0, 0, 0, 0)
+    const end = new Date(start); end.setDate(end.getDate() + 7)
+    const week = pending.filter(t => t.deadline && new Date(t.deadline) >= start && new Date(t.deadline) < end)
+    if (!week.length) return { reply: "📆 No tasks due this week.", action: null }
+    const lines = week.slice(0, 8).map((t, i) => `${i + 1}. ${t.title} · ${fmtTime(t.deadline)}`).join('\n')
+    return { reply: `📆 ${week.length} task(s) this week:\n${lines}`, action: 'list_week' }
+  }
+  if (/\b(completed|finished|done) (tasks?|todos?)\b/i.test(lower) || /\b(what have i (finished|completed|done))\b/i.test(lower)) {
+    if (!done.length) return { reply: "No completed tasks yet. Go finish one!", action: null }
+    const recent = done.sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt)).slice(0, 5)
+    const lines = recent.map((t, i) => `${i + 1}. ${t.title}${t.flagged ? ' ⚠️' : ''}`).join('\n')
+    return { reply: `✅ Last ${recent.length} completed:\n${lines}\nTotal valid: ${done.filter(t => !t.flagged).length}/${done.length}.`, action: 'list_completed' }
+  }
+  if (/\b(how many|count)\b.*\btasks?\b/i.test(lower)) {
+    return { reply: `📊 ${pending.length} pending · ${done.length} completed · ${allTasks.length} total.`, action: 'count' }
   }
   if (/\b(show|list|what are|view)\b.*(tasks?|pending|todos?)/i.test(lower) || /\b(my|pending) tasks\b/i.test(lower)) {
-    const tasks = await d.collection('tasks').find({ userId: user.id, status: 'pending' }).sort({ priority: -1 }).limit(10).toArray()
-    if (!tasks.length) return { reply: "🎉 No pending tasks! You're all caught up.", action: 'list_tasks' }
-    const lines = tasks.slice(0, 5).map((t, i) => `${i + 1}. ${t.title} (P${t.priority}${t.deadline ? ' · ' + new Date(t.deadline).toLocaleDateString() : ''})`).join('\n')
-    return { reply: `You have ${tasks.length} pending task(s):\n${lines}`, action: 'list_tasks' }
+    if (!pending.length) return { reply: "🎉 No pending tasks! You're all caught up.", action: 'list_tasks' }
+    const lines = pending.slice(0, 5).map((t, i) => `${i + 1}. ${t.title} (P${t.priority}${t.deadline ? ' · ' + new Date(t.deadline).toLocaleDateString() : ''})`).join('\n')
+    return { reply: `You have ${pending.length} pending task(s):\n${lines}`, action: 'list_tasks' }
   }
-  if (/^(complete|finish|done|mark done)\s+/i.test(text)) {
-    const q = text.replace(/^(complete|finish|done|mark done)\s+/i, '').trim()
-    const tasks = await d.collection('tasks').find({ userId: user.id, status: 'pending' }).toArray()
-    const match = tasks.find(t => t.title.toLowerCase().includes(q.toLowerCase()))
-    if (!match) return { reply: `Couldn't find a pending task matching "${q}".`, action: null }
-    // Use the anti-fake middleware
+
+  // ==================== Complete / delete / update task ====================
+  if (/^(complete|finish|done|mark done|check off)\s+/i.test(text)) {
+    const q = text.replace(/^(complete|finish|done|mark done|check off)\s+/i, '').trim()
+    const match = matchTaskByName(pending, q)
+    if (!match) return { reply: `Couldn't find a pending task matching "${q}". Try "show my pending tasks" first.`, action: null }
     const s = await scoreActivity(d, user.id, { actionType: 'task_complete', createdAt: match.createdAt, startedAt: match.startedAt, deadline: match.deadline })
     await d.collection('tasks').updateOne({ id: match.id }, { $set: { status: 'completed', completedAt: new Date().toISOString(), confidenceScore: s.score, flagged: s.flagged, completionReasons: s.reasons } })
     await logActivity(d, user.id, 'task_complete', match.id, s)
@@ -411,27 +508,124 @@ async function chatbotHandle(d, user, message) {
     await awardXP(d, user, xp)
     return { reply: `🎯 Completed "${match.title}" — +${xp} XP (confidence ${Math.round(s.score * 100)}%)${s.flagged ? ' ⚠️ flagged' : ''}`, action: 'task_completed' }
   }
-  if (/^(add|create|track)\s+habit/i.test(text)) {
-    const name = text.replace(/^(add|create|track)\s+habit\s*:?/i, '').trim()
+  if (/^(delete|remove|cancel|drop)\s+(task\s+)?/i.test(text) && !/habit/i.test(text) && !/workspace/i.test(text)) {
+    const q = text.replace(/^(delete|remove|cancel|drop)\s+(task\s+)?/i, '').trim()
+    const match = matchTaskByName(allTasks, q)
+    if (!match) return { reply: `No task matches "${q}".`, action: null }
+    await d.collection('tasks').deleteOne({ id: match.id, userId: user.id })
+    return { reply: `🗑️ Deleted "${match.title}".`, action: 'task_deleted' }
+  }
+  {
+    const m = text.match(/^set\s+(priority|importance)\s+(?:of\s+)?(.+?)\s+to\s+(high|medium|low|\d+)$/i)
+    if (m) {
+      const q = m[2].trim(), level = m[3].toLowerCase()
+      const match = matchTaskByName(pending, q)
+      if (!match) return { reply: `No pending task matches "${q}".`, action: null }
+      const importance = level === 'high' ? 9 : level === 'medium' ? 5 : level === 'low' ? 2 : Math.max(1, Math.min(10, parseInt(level)))
+      const urgency = calcUrgency(match.deadline)
+      const priority = calcPriority({ urgency, importance, effort: match.effort || 5, delayHistory: match.delayHistory || 0 })
+      await d.collection('tasks').updateOne({ id: match.id }, { $set: { importance, priority } })
+      return { reply: `🔧 Updated "${match.title}" → importance ${importance}/10, priority ${priority}.`, action: 'task_updated' }
+    }
+  }
+
+  // ==================== Habits ====================
+  if (/^(add|create|track|new)\s+habit/i.test(text)) {
+    const name = text.replace(/^(add|create|track|new)\s+habit\s*:?/i, '').trim()
     if (!name) return { reply: 'Give your habit a name, e.g. "Add habit read 30 min"', action: null }
     const habit = { id: uuidv4(), userId: user.id, name, checkins: [], streak: 0, strength: 0, createdAt: new Date().toISOString() }
     await d.collection('habits').insertOne(habit)
     const { _id, ...clean } = habit
     return { reply: `🔁 Started tracking habit: ${name}`, action: 'habit_created', data: clean }
   }
-  if (/\b(stats|productivity|score|analytics|how am i)\b/i.test(lower)) {
-    const tasks = await d.collection('tasks').find({ userId: user.id }).toArray()
-    const valid = tasks.filter(t => t.status === 'completed' && !t.flagged)
-    const rate = tasks.length ? Math.round((valid.length / tasks.length) * 100) : 0
-    return { reply: `📊 Valid completions: ${valid.length}/${tasks.length} (${rate}%). XP: ${user.xp || 0}, Level: ${user.level || 1}.`, action: 'stats' }
+  const habitsAll = await d.collection('habits').find({ userId: user.id }).toArray()
+  if (/\b(list|show|my)\s+habits?\b/i.test(lower) || /\b(streaks?|habit (strength|list))\b/i.test(lower)) {
+    if (!habitsAll.length) return { reply: "No habits yet. Try 'Add habit meditate 10 min'.", action: null }
+    const lines = habitsAll.map((h, i) => `${i + 1}. ${h.name} · 🔥 streak ${h.streak || 0} · ${Math.round(calcHabitStrength(h))}% strength`).join('\n')
+    return { reply: `🔁 ${habitsAll.length} habit(s):\n${lines}`, action: 'list_habits' }
+  }
+  if (/^(check ?in|log habit|did)\s+/i.test(text)) {
+    const q = text.replace(/^(check ?in|log habit|did)\s+/i, '').trim()
+    const habit = matchHabitByName(habitsAll, q)
+    if (!habit) return { reply: `No habit matches "${q}".`, action: null }
+    const today = new Date(); today.setHours(0, 0, 0, 0)
+    const already = (habit.checkins || []).some(c => new Date(c).setHours(0, 0, 0, 0) === today.getTime())
+    if (already) return { reply: `✅ "${habit.name}" already checked in today.`, action: null }
+    const s = await scoreActivity(d, user.id, { actionType: 'habit_check', createdAt: habit.createdAt })
+    await logActivity(d, user.id, 'habit_check', habit.id, s)
+    const checkins = [...(habit.checkins || []), new Date().toISOString()]
+    const streak = updateStreak({ ...habit, checkins })
+    const strength = calcHabitStrength({ ...habit, checkins, streak })
+    await d.collection('habits').updateOne({ id: habit.id }, { $set: { checkins, streak, strength } })
+    const xp = Math.round(10 * s.score)
+    await awardXP(d, user, xp)
+    return { reply: `🔥 Checked in "${habit.name}" — streak ${streak}, +${xp} XP (conf ${Math.round(s.score * 100)}%).`, action: 'habit_checked' }
+  }
+  if (/^(delete|remove)\s+habit\s+/i.test(text)) {
+    const q = text.replace(/^(delete|remove)\s+habit\s+/i, '').trim()
+    const habit = matchHabitByName(habitsAll, q)
+    if (!habit) return { reply: `No habit matches "${q}".`, action: null }
+    await d.collection('habits').deleteOne({ id: habit.id, userId: user.id })
+    return { reply: `🗑️ Removed habit "${habit.name}".`, action: 'habit_deleted' }
+  }
+
+  // ==================== Workspaces ====================
+  if (/\b(show|list|my)\s+workspaces?\b/i.test(lower) || /\bteams?\b/i.test(lower)) {
+    const ws = await d.collection('workspaces').find({
+      $or: [{ ownerId: user.id }, { 'members.userId': user.id }]
+    }).toArray()
+    if (!ws.length) return { reply: "You're not in any workspace yet. Try 'Create workspace <name>' or use an invite code.", action: null }
+    const lines = ws.map((w, i) => `${i + 1}. ${w.name} · ${w.ownerId === user.id ? 'owner' : 'member'} · ${(w.members || []).length + 1} member(s)`).join('\n')
+    return { reply: `👥 Your workspaces:\n${lines}`, action: 'list_workspaces' }
+  }
+  if (/^(create|new)\s+workspace\s+/i.test(text)) {
+    const name = text.replace(/^(create|new)\s+workspace\s+/i, '').trim()
+    if (!name) return { reply: "Give it a name, e.g. 'Create workspace Design Team'.", action: null }
+    const ws = { id: uuidv4(), name, ownerId: user.id, ownerName: user.name, members: [], inviteCode: crypto.randomBytes(4).toString('hex'), createdAt: new Date().toISOString() }
+    await d.collection('workspaces').insertOne(ws)
+    return { reply: `👥 Created workspace "${name}". Invite code: ${ws.inviteCode}`, action: 'workspace_created' }
+  }
+
+  // ==================== Stats / analytics / trust ====================
+  if (/\b(weekly summary|week summary|recap|how was my week)\b/i.test(lower)) {
+    const weekAgo = new Date(Date.now() - 7 * 86400000)
+    const wkDone = done.filter(t => t.completedAt && new Date(t.completedAt) >= weekAgo && !t.flagged)
+    const wkCheckins = habitsAll.reduce((a, h) => a + (h.checkins || []).filter(c => new Date(c) >= weekAgo).length, 0)
+    return { reply: `📅 Last 7 days:\n• ${wkDone.length} valid task completions\n• ${wkCheckins} habit check-ins\n• XP gained tracked in profile\nKeep going!`, action: 'weekly' }
+  }
+  if (/\b(trust|security|flagged|suspicious|fake activity)\b/i.test(lower)) {
+    const total = await d.collection('activity_logs').countDocuments({ userId: user.id })
+    const flagged = await d.collection('activity_logs').countDocuments({ userId: user.id, flagged: true })
+    const trustPct = total ? Math.round(((total - flagged) / total) * 100) : 100
+    return { reply: `🛡️ Trust score: ${trustPct}% · ${flagged}/${total} actions flagged by the anti-fake layer.${flagged > 0 ? " Use Start → Complete for full XP." : ' Looking squeaky clean.'}`, action: 'trust' }
+  }
+  if (/\b(xp|level|points|progress)\b/i.test(lower) && !/\btasks?\b/.test(lower)) {
+    const fresh = await d.collection('users').findOne({ id: user.id })
+    const xp = fresh?.xp || 0, lvl = fresh?.level || 1
+    const nextLevel = lvl * 100
+    const toNext = nextLevel - xp
+    return { reply: `🏆 Level ${lvl} · ${xp} XP · ${toNext > 0 ? `${toNext} XP to Level ${lvl + 1}` : 'level up pending!'}`, action: 'xp' }
+  }
+  if (/\b(peak|best hour|best time|most productive hour)\b/i.test(lower)) {
+    const ins = await generateInsights(d, user)
+    if (ins.peakHour) return { reply: `🔥 Your peak window is ${ins.peakHour.start}:00 – ${ins.peakHour.end}:00 (${ins.peakHour.count} completions in range). Schedule hard work there.`, action: 'peak' }
+    return { reply: "Not enough data yet. Complete 3+ tasks and I'll detect your peak hours.", action: null }
+  }
+  if (/\b(stats|productivity|score|analytics|how am i|dashboard)\b/i.test(lower)) {
+    const valid = done.filter(t => !t.flagged)
+    const rate = allTasks.length ? Math.round((valid.length / allTasks.length) * 100) : 0
+    const fresh = await d.collection('users').findOne({ id: user.id })
+    return { reply: `📊 Valid completions: ${valid.length}/${allTasks.length} (${rate}%)\n🏆 Level ${fresh?.level || 1} · ${fresh?.xp || 0} XP\n🔁 Habits: ${habitsAll.length}\nType "insights" for personalized tips.`, action: 'stats' }
   }
   if (/\b(insight|suggest|recommend|advice|tips?)\b/i.test(lower)) {
     const { insights } = await generateInsights(d, user)
     const top = insights.slice(0, 3).map(i => `${i.icon} ${i.title}: ${i.message}`).join('\n\n')
     return { reply: top, action: 'insights' }
   }
+
+  // ==================== Fallback ====================
   return {
-    reply: `I can help you with:\n• "Add task finish report tomorrow at 5 PM"\n• "Show my pending tasks"\n• "Complete <task name>"\n• "Add habit read 30 min"\n• "Show my stats"\n• "Give me insights"`,
+    reply: `🤔 I didn't catch that. Type "help" to see everything I can do.\n\nPopular commands:\n• Add task <title> tomorrow at 5 PM\n• What's my top task\n• What's due today\n• Show my stats\n• Give me insights\n• Motivate me`,
     action: null
   }
 }

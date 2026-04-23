@@ -886,7 +886,7 @@ function Analytics({ data }) {
 function Chatbot({ onAction }) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState([
-    { from: 'bot', text: "Hi! I'm your NeuroFlow assistant. Try:\n• Add task finish report tomorrow at 5 PM\n• Show my pending tasks\n• Give me insights" }
+    { from: 'bot', text: "Hi! I'm your NeuroFlow Assistant 🧠\n\nI can help you manage tasks, habits, workspaces & insights — all with plain English.\n\nTry:\n• What's my top task\n• What's due today\n• Add task finish report tomorrow at 5 PM\n• Show my stats / trust score\n• Motivate me\n• Type 'help' to see everything!" }
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
